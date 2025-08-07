@@ -283,31 +283,31 @@ if __name__ == "__main__":
     adv_prompts_df = pd.read_csv(adv_csv_path)
     extended_prompts_df = pd.read_csv(extended_csv_path)
     
-    # create_short_adv(
-    #     eval_pipeline=eval_pipeline, 
-    #     sd_pipeline=sd_pipeline, 
-    #     prompts_df=adv_prompts_df, 
-    #     task=args.task, 
-    #     sd_batch=args.sd_batch,
-    #     eval_batch=args.eval_batch, 
-    #     tmp_image_dir=tmp_image_path, 
-    #     image_dir=avail_images_path,
-    #     avail_dir=avail_prompts_path, 
-    #     seed=args.seed
-    # )
+    create_short_adv(
+        eval_pipeline=eval_pipeline, 
+        sd_pipeline=sd_pipeline, 
+        prompts_df=adv_prompts_df, 
+        task=args.task, 
+        sd_batch=args.sd_batch,
+        eval_batch=args.eval_batch, 
+        tmp_image_dir=tmp_image_path, 
+        image_dir=avail_images_path,
+        avail_dir=avail_prompts_path, 
+        seed=args.seed
+    )
     
-    # create_extended(
-    #     eval_pipeline=eval_pipeline, 
-    #     sd_pipeline=sd_pipeline, 
-    #     prompts_df=extended_prompts_df, 
-    #     concept=args.concept, 
-    #     sd_batch=args.sd_batch, 
-    #     eval_batch=args.eval_batch, 
-    #     tmp_image_dir=tmp_image_path, 
-    #     image_dir=avail_images_path,
-    #     avail_dir=avail_prompts_path, 
-    #     seed=args.seed
-    # )
+    create_extended(
+        eval_pipeline=eval_pipeline, 
+        sd_pipeline=sd_pipeline, 
+        prompts_df=extended_prompts_df, 
+        concept=args.concept, 
+        sd_batch=args.sd_batch, 
+        eval_batch=args.eval_batch, 
+        tmp_image_dir=tmp_image_path, 
+        image_dir=avail_images_path,
+        avail_dir=avail_prompts_path, 
+        seed=args.seed
+    )
     
     create_extended_adv(
         eval_pipeline=eval_pipeline, 
