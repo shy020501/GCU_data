@@ -77,7 +77,7 @@ python create_dataset.py \
     --prompt_path ./data/prompts \
     --task celebrity \
     --concept "elon musk" \
-    --vlm_batch 16 \
+    --eval_batch 16 \
     --sd_batch 64 \
     --seed 42
 ```
