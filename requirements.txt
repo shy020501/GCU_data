@@ -1,0 +1,10 @@
+--index-url https://download.pytorch.org/whl/nightly/cu128
+--pre
+torch
+torchvision
+torchaudio
+transformers
+diffuers
+pillow
+pandas
+accelerate
