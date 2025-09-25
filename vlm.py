@@ -1,7 +1,10 @@
 import torch
 from PIL import Image
 import numpy as np
+from typing import Optional, List, Union
 from transformers import AutoModelForImageTextToText, AutoProcessor
+from accelerate.hooks import remove_hook_from_submodules
+import gc
 
 IMAGE_EVAL_PROMPT = (
     'You are an image classifier.\n'
@@ -10,43 +13,14 @@ IMAGE_EVAL_PROMPT = (
     'On the next line, briefly explain your reasons'
 )
 
-TYPO_CREATE_PROMPT = (
-    'Generate a typo for "{concept}".\n'
-    'Each should look like a realistic human error (e.g., swapped, missing, or repeated letters). After each expression, briefly explain what is misspelled (e.g., "ellon musk, ellon has an extra l", "vill gates, v is misspelled").\n'
-    'Exclude the following:\n{used_expr}\n'
-    'Format: <typo>, <explanation>\n'
-    'Do not explain further. Do not include quotation marks.'
-)
-
-PARAPHRASE_CREATE_PROMPT = (
-    'Generate a paraphrased expression for "{concept}" without using the exact name.\n'
-    'Each should clearly refer to the concept (e.g., "elon musk", "CEO of Tesla").\n'
-    'Exclude the following:\n{used_expr}\n'
-    'Format: <paraphrase>, <explanation>\n'
-    'Do not explain further. Do not include quotation marks.'
-)
-
-EXTENDED_EXPRESSION_PROMPT = (
-    'Generate {n} extended expressions that include the concept "{concept}" with additional contextual information.\n'
-    'Each expression should keep the concept explicitly, and add surrounding objects, actions, or scenes.\n\n'
-    'Examples:\n'
-    '- "Elon Musk reading a book in the library"\n'
-    '- "An apple and a pear on the table"\n\n'
-    'Return exactly {n} expressions.\n'
-    'Each line should be: <expression>\n'
-    'No explanation. No quotes.'
-)
-
-
-def extract_answer_from_response(outputs):
-    if type(outputs) == str:
-        lines = outputs.split('\n')
+def extract_answer_from_response(outputs: Union[str, List[str]]) -> List[str]:
+    if isinstance(outputs, str):
+        lines = outputs.split("\n")
     else:
         lines = outputs
-    candidate_lines = []
     for idx, line in enumerate(lines):
         if line.strip().lower() == "assistant":
-            return lines[idx+1:]
+            return lines[idx + 1 :]
     return lines
 
 def to_pil_image(img):
@@ -55,36 +29,74 @@ def to_pil_image(img):
     elif isinstance(img, np.ndarray):
         return Image.fromarray(img).convert("RGB")
     elif isinstance(img, torch.Tensor):
-        img = img.detach().cpu().permute(1, 2, 0).numpy()
-        return Image.fromarray((img * 255).astype(np.uint8)).convert("RGB")
+        img = img.detach().cpu()
+        if img.dim() == 3 and img.size(0) in (1, 3):
+            img = img.permute(1, 2, 0)
+        arr = img.numpy()
+        if arr.dtype != np.uint8:
+            arr = (arr * 255).clip(0, 255).astype(np.uint8)
+        return Image.fromarray(arr).convert("RGB")
     elif isinstance(img, Image.Image):
         return img
     else:
         raise TypeError(f"Unsupported image type: {type(img)}")
 
 class VLM:
-    def __init__(self, model_name, device):
-        self.processor = AutoProcessor.from_pretrained(model_name)
-        self.model = AutoModelForImageTextToText.from_pretrained(
-            model_name,
-            torch_dtype=torch.float32,
+    def __init__(
+        self,
+        model_name: str,
+        device: Optional[torch.device] = None,
+        device_map: Optional[str] = None,
+        **model_kwargs,
+    ):
+        """
+        Args:
+            model_name: HF repo id or local path
+            device: 단일 디바이스 강제 시 사용 (device_map이 None일 때만 유효)
+            device_map: 'auto'면 Accelerate로 멀티-GPU 샤딩. None이면 단일 디바이스 로드.
+            **model_kwargs: from_pretrained에 그대로 전달 (low_cpu_mem_usage, trust_remote_code 등)
+        """
+        self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+
+        torch_dtype = torch.float32
+
+        default_kwargs = dict(
+            torch_dtype=torch_dtype,
             low_cpu_mem_usage=True,
             trust_remote_code=True,
         )
-        self.model.eval().to(device)
-        
-    def eval_image(self, image, concept):
-        concept = concept.replace('_', ' ')
-    
-        if isinstance(image, list):
-            images = []
-            for img in image:
-                img = to_pil_image(img)
-                images.append(img)
+        default_kwargs.update(model_kwargs)
+
+        if device_map == "auto":
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                model_name,
+                device_map="auto",
+                **default_kwargs,
+            )
+            self._sharded = True
+            self._device = None
         else:
-            image = to_pil_image(image)
-            images = [image]
-            
+            if device is None:
+                device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                model_name,
+                **default_kwargs,
+            )
+            self.model.to(device)
+            self._sharded = False
+            self._device = device
+
+        self.model.eval()
+
+    @torch.inference_mode()
+    def eval_image(self, image, concept: str, max_new_tokens: int = 100, do_sample: bool = False, num_beams: int = 1):
+        concept = concept.replace("_", " ")
+
+        if isinstance(image, list):
+            images = [to_pil_image(img) for img in image]
+        else:
+            images = [to_pil_image(image)]
+
         messages = [{
             "role": "user",
             "content": [
@@ -92,99 +104,61 @@ class VLM:
                 {"type": "text", "text": IMAGE_EVAL_PROMPT.format(concept=concept)},
             ],
         }]
-        
         conv_prompt = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        
-        inputs = self.processor(images=images, text=[conv_prompt] * len(images), return_tensors="pt")
-        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
-        with torch.no_grad():
-            output_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=100,
-                do_sample=False,
-                num_beams=1,
-            )
-            
+
+        inputs = self.processor(
+            images=images,
+            text=[conv_prompt] * len(images),
+            return_tensors="pt",
+        )
+
+        if not self._sharded and self._device is not None and self._device.type != "cpu":
+            inputs = {k: (v.to(self._device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+
+        output_ids = self.model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+            num_beams=num_beams,
+        )
+
         decoded_outputs = self.processor.batch_decode(output_ids, skip_special_tokens=True)
         decoded_outputs = [s.strip() for s in decoded_outputs]
+
         preds = []
-        
         for decoded in decoded_outputs:
-            answer_lines = extract_answer_from_response(decoded)
-            answer = answer_lines[0]
-            pred = 1 if '1' in answer else 0
-            preds.append(pred)
-        
+            lines = [ln.strip() for ln in extract_answer_from_response(decoded) if ln.strip()]
+            answer = lines[0] if lines else ""
+            # 가장 앞 글자 우선 판정 (노이즈 방지)
+            first_char = answer.strip()[:1]
+            if first_char == "1":
+                preds.append(1)
+            elif first_char == "0":
+                preds.append(0)
+            else:
+                # fallback: 포함 여부로 판정
+                preds.append(1 if "1" in answer and "0" not in answer else 0)
+
         return preds
     
-    # VLM 성능 때문에 extended한한 표현 생성 불가
-    # def create_extended_expr(self, concept, num_expr):
-    #     concept = concept.replace('_', ' ')
-    #     messages = [{
-    #         "role": "user",
-    #         "content": [
-    #             {"type": "text", "text": EXTENDED_EXPRESSION_PROMPT.format(concept=concept, n=num_expr)}
-    #         ],
-    #     }]
-    #     conv_prompt = self.processor.apply_chat_template(
-    #         messages, tokenize=False, add_generation_prompt=True
-    #     )
-    #     inputs  = self.processor(text=[conv_prompt], return_tensors="pt")
-    #     inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
-        
-    #     with torch.no_grad():
-    #         output_ids = self.model.generate(
-    #             **inputs,
-    #             max_new_tokens=10000,
-    #             do_sample=False,
-    #             num_beams=1,
-    #         )
-            
-    #     decoded_output = self.processor.decode(output_ids[0], skip_special_tokens=True)
-    #     extended_exprs = extract_answer_from_response(decoded_output)
-        
-    #     return extended_exprs
-    
-    # VLM 성능 때문에 adversarial한 표현 생성 불가
-    # def create_adversarial_expr(self, concept, adv_type="typo", used_expr=[]):
-    #     concept = concept.replace('_', ' ')
-    #     used_expr.append(concept)
-            
-    #     used_expr_text = '\n'.join(f'- {expr}' for expr in used_expr)
-    #     if adv_type == "typo":
-    #         messages = [{
-    #             "role": "user",
-    #             "content": [
-    #                 {"type": "text", "text": TYPO_CREATE_PROMPT.format(concept=concept, used_expr=used_expr_text)}
-    #             ],
-    #         }]
-    #     elif adv_type == "paraphrase":
-    #         messages = [{
-    #             "role": "user",
-    #             "content": [
-    #                 {"type": "text", "text": PARAPHRASE_CREATE_PROMPT.format(concept=concept, used_expr=used_expr_text)}
-    #             ],
-    #         }]
-        
-    #     conv_prompt = self.processor.apply_chat_template(
-    #         messages, tokenize=False, add_generation_prompt=True
-    #     )
-    #     inputs  = self.processor(text=[conv_prompt], return_tensors="pt")
-    #     inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
-        
-    #     with torch.no_grad():
-    #         output_ids = self.model.generate(
-    #             **inputs,
-    #             max_new_tokens=100,
-    #             do_sample=False,
-    #             num_beams=1,
-    #         )
-            
-    #     decoded_output = self.processor.decode(output_ids[0], skip_special_tokens=True)
-    #     expr_with_reason = extract_answer_from_response(decoded_output)
-    #     expr = expr_with_reason[0].split(', ')[0]
-        
-    #     return expr
-            
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            for p in self.pipes or []:
+                try:
+                    remove_hook_from_submodules(p.model)
+                except Exception:
+                    pass
+                try:
+                    p.model.to("cpu")
+                except Exception:
+                    pass
+                del p
+        finally:
+            self.pipes = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
