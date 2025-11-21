@@ -58,7 +58,7 @@ class VLM:
         """
         self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
 
-        torch_dtype = torch.float32
+        torch_dtype = torch.float16
 
         default_kwargs = dict(
             torch_dtype=torch_dtype,
@@ -87,6 +87,12 @@ class VLM:
             self._device = device
 
         self.model.eval()
+        first_param = next(self.model.parameters())
+        print("[VLM] first param device:", first_param.device)
+        print("[VLM] device_map:", getattr(self.model, "hf_device_map", "no hf_device_map"))
+        print("[VLM DEBUG] torch.cuda.is_available():", torch.cuda.is_available())
+        if torch.cuda.is_available():
+            print("[VLM DEBUG] cuda device 0 name:", torch.cuda.get_device_name(0))
 
     @torch.inference_mode()
     def eval_image(self, image, concept: str, max_new_tokens: int = 100, do_sample: bool = False, num_beams: int = 1):
@@ -113,6 +119,12 @@ class VLM:
             text=[conv_prompt] * len(images),
             return_tensors="pt",
         )
+
+        model_dtype = getattr(self.model, "dtype", torch.float16)
+
+        for k, v in inputs.items():
+            if isinstance(v, torch.Tensor) and v.is_floating_point():
+                inputs[k] = v.to(dtype=model_dtype)
 
         if not self._sharded and self._device is not None and self._device.type != "cpu":
             inputs = {k: (v.to(self._device) if hasattr(v, "to") else v) for k, v in inputs.items()}

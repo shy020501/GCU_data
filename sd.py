@@ -9,7 +9,7 @@ ETA = 1.0
 
 class SD:
     def __init__(self, device, model_id="CompVis/stable-diffusion-v1-4"):
-        self.pipeline = StableDiffusionPipeline.from_pretrained(model_id)
+        self.pipeline = StableDiffusionPipeline.from_pretrained(model_id, safety_checker=None, feature_extractor=None)
         self.pipeline.scheduler = DDIMScheduler.from_config(self.pipeline.scheduler.config)
         self.pipeline = self.pipeline.to(device)
         self.pipeline.safety_checker = None
