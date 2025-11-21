@@ -5,6 +5,7 @@ import argparse
 import pandas as pd
 import torch
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from utils import check_single_csv
 
 from vlm import VLM
 from sd import SD
@@ -538,6 +539,24 @@ if __name__ == "__main__":
     raw = args.concepts
     concepts = [c.strip() for c in raw.split(",") if c.strip()]
     concepts = [c.replace(" ", "_").lower() for c in concepts]
+
+    # Check CSV files
+    for concept in concepts:
+        adv_path = os.path.join(args.prompt_path, args.task, concept, "adversarial.csv")
+        extended_path = os.path.join(args.prompt_path, args.task, concept, "extended.csv")
+        error = check_single_csv(
+            adv_path,
+            required_cols=["expr", "type", "type"],
+        )
+
+        assert not error, "Error while reading csv file"
+
+        error = check_single_csv(
+            extended_path,
+            required_cols=["expr", "type", "type"],
+        )
+
+        assert not error, "Error while reading csv file"
 
     for concept in concepts:
         print(f"\n======================= Working on concept [{concept}] =======================")
