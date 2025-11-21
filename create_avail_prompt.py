@@ -445,8 +445,6 @@ def run_short_adv_seq(vlm_model_id, devices, prompts_df, task, concept,
                 continue
             all_prompts.append(formatted_expr)
             all_types.append(typ)
-    all_prompts = all_prompts[:64]
-    all_types = all_types[:64]
 
     if not all_prompts:
         print(f"[short_adv] concept={concept_key}: no new candidate prompts left.")
